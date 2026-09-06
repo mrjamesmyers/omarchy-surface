@@ -1,0 +1,141 @@
+#!/bin/bash
+# Automatic screen brightness without an ambient light sensor.
+#
+# The ALS on some Surface models (Pro 7+ at least) never returns data - see
+# linux-surface#2274 - so there is nothing to drive auto-brightness with. This
+# drives it from the sun instead: full brightness in daylight, dim at night,
+# and a smooth ramp across dawn and dusk.
+#
+# For a vehicle-mounted tablet this is arguably better than a real ALS, which
+# would swing wildly every time you pass under a bridge or a streetlight sweeps
+# the cabin. Solar position is smooth and predictable.
+#
+# Manual changes win: if the panel brightness no longer matches what this script
+# last set, someone moved it deliberately, so it backs off for a while rather
+# than fighting them.
+#
+# Usage: surface-autobrightness [apply|status|once]
+#   apply   set brightness for right now (default; what the timer calls)
+#   status  print what it would do and why, change nothing
+#
+# Config (all optional): ~/.config/surface-autobrightness.conf
+#   LAT=47.61          # decimal degrees, north positive
+#   LON=-122.33        # decimal degrees, east positive
+#   DAY_PCT=100        # brightness in full daylight
+#   NIGHT_PCT=15       # brightness at night
+#   RAMP_MIN=45        # minutes of ramp either side of sunrise/sunset
+#   OVERRIDE_MIN=90    # back off this long after a manual change
+# Without LAT/LON it falls back to a fixed 07:00-19:00 day window.
+
+set -u
+
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/surface-autobrightness.conf"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/surface-autobrightness"
+
+LAT=""; LON=""
+DAY_PCT=100; NIGHT_PCT=15; RAMP_MIN=45; OVERRIDE_MIN=90
+[[ -r $CONF ]] && . "$CONF"
+
+BL=$(ls -d /sys/class/backlight/* 2>/dev/null | head -1)
+[[ -z $BL ]] && { echo "no backlight device" >&2; exit 1; }
+MAX=$(cat "$BL/max_brightness")
+CUR=$(cat "$BL/brightness")
+cur_pct=$(( CUR * 100 / MAX ))
+
+# Target percentage for right now. Python does the solar maths; it is in the
+# base install and the alternative is a lot of bash trigonometry.
+target=$(LAT="$LAT" LON="$LON" DAY_PCT="$DAY_PCT" NIGHT_PCT="$NIGHT_PCT" RAMP_MIN="$RAMP_MIN" python3 - <<'PY'
+import os, math, time, datetime
+lat = os.environ.get("LAT") or ""
+lon = os.environ.get("LON") or ""
+day   = float(os.environ["DAY_PCT"])
+night = float(os.environ["NIGHT_PCT"])
+ramp  = float(os.environ["RAMP_MIN"])
+now = datetime.datetime.now()
+mins = now.hour * 60 + now.minute
+
+def lerp(a, b, t): return a + (b - a) * max(0.0, min(1.0, t))
+
+if lat and lon:
+    # NOAA sunrise/sunset, accurate to well under a minute - far better than
+    # this application needs, and it costs nothing.
+    lat_f, lon_f = float(lat), float(lon)
+    n = now.timetuple().tm_yday
+    gamma = 2*math.pi/365*(n-1+(now.hour-12)/24)
+    eqtime = 229.18*(0.000075+0.001868*math.cos(gamma)-0.032077*math.sin(gamma)
+                     -0.014615*math.cos(2*gamma)-0.040849*math.sin(2*gamma))
+    decl = (0.006918-0.399912*math.cos(gamma)+0.070257*math.sin(gamma)
+            -0.006758*math.cos(2*gamma)+0.000907*math.sin(2*gamma)
+            -0.002697*math.cos(3*gamma)+0.00148*math.sin(3*gamma))
+    # -0.833 deg accounts for refraction and the solar disc radius.
+    cosH = (math.cos(math.radians(90.833))
+            / (math.cos(math.radians(lat_f))*math.cos(decl))
+            - math.tan(math.radians(lat_f))*math.tan(decl))
+    if cosH > 1:      sunrise, sunset = None, None      # polar night
+    elif cosH < -1:   sunrise, sunset = 0, 24*60        # midnight sun
+    else:
+        ha = math.degrees(math.acos(cosH))
+        off = -time.timezone/60 if not time.localtime().tm_isdst else -time.altzone/60
+        sunrise = 720 - 4*(lon_f + ha) - eqtime + off
+        sunset  = 720 - 4*(lon_f - ha) - eqtime + off
+else:
+    sunrise, sunset = 7*60, 19*60
+
+if sunrise is None:
+    val = night
+elif mins < sunrise - ramp or mins > sunset + ramp:
+    val = night
+elif mins < sunrise + ramp:
+    val = lerp(night, day, (mins - (sunrise - ramp)) / (2*ramp))
+elif mins > sunset - ramp:
+    val = lerp(day, night, (mins - (sunset - ramp)) / (2*ramp))
+else:
+    val = day
+print(int(round(val)))
+PY
+)
+
+[[ -z ${target:-} ]] && { echo "could not compute target" >&2; exit 1; }
+
+last_set=""
+[[ -r $STATE ]] && read -r last_set _ < "$STATE" 2>/dev/null
+now_epoch=$(date +%s)
+override_until=0
+[[ -r $STATE ]] && override_until=$(awk '{print $2+0}' "$STATE" 2>/dev/null)
+
+# A manual change is "current differs from what we last set by more than 3%".
+manual=0
+if [[ -n $last_set ]] && (( ${last_set:-0} > 0 )); then
+  diff=$(( cur_pct - last_set )); (( diff < 0 )) && diff=$(( -diff ))
+  (( diff > 3 )) && manual=1
+fi
+
+case "${1:-apply}" in
+  status)
+    echo "  backlight   : $BL"
+    echo "  current     : ${cur_pct}%"
+    echo "  target now  : ${target}%"
+    echo "  last set by : ${last_set:-<never>}%"
+    if (( manual )); then echo "  state       : manual override detected"
+    elif (( now_epoch < override_until )); then
+      echo "  state       : backing off for $(( (override_until-now_epoch)/60 )) more min"
+    else echo "  state       : tracking"; fi
+    [[ -n $LAT && -n $LON ]] && echo "  mode        : solar (LAT=$LAT LON=$LON)" \
+                             || echo "  mode        : fixed 07:00-19:00 (set LAT/LON in $CONF for solar)"
+    exit 0 ;;
+esac
+
+if (( manual )); then
+  mkdir -p "$(dirname "$STATE")"
+  echo "$cur_pct $(( now_epoch + OVERRIDE_MIN*60 ))" > "$STATE"
+  exit 0
+fi
+(( now_epoch < override_until )) && exit 0
+(( cur_pct == target )) && exit 0
+
+brightnessctl -q set "${target}%" 2>/dev/null || \
+  echo $(( target * MAX / 100 )) > "$BL/brightness" 2>/dev/null || {
+    echo "could not set brightness (need brightnessctl or write access)" >&2; exit 1; }
+
+mkdir -p "$(dirname "$STATE")"
+echo "$target $override_until" > "$STATE"

@@ -40,8 +40,8 @@ you can paste it straight into a bug report. Measured on Surface Pro 7+:
 | Wi-Fi / Bluetooth / audio / battery | ✅ | stock kernel |
 | Thermal profiles | ✅ | `surface_platform_profile` |
 | Suspend + hibernate | ✅ | s2idle only — see below |
-| **Ambient light sensor** | ❌ | driver binds, ADC never converts |
-| **Auto-brightness** | ❌ | blocked by the ALS |
+| **Ambient light sensor** | ❌ | driver binds, ADC never converts ([#2274](https://github.com/linux-surface/linux-surface/issues/2274)) |
+| Auto-brightness | ⚠️ | no ALS, but `surface-autobrightness` drives it from the sun |
 | **Cameras** | ❌ | IPU6 firmware boots, sensors mis-powered |
 | **IR camera / Windows Hello** | ❌ | `ov7251` probe fails `-121` |
 | **Type Cover backlight** | ❌ | no `kbd_backlight` in `/sys/class/leds` |
@@ -63,6 +63,38 @@ deliberately claims it (`alias: acpi*:MSHW0184:*`). It still returns nothing:
 Forcing 64x gain and ~103 ms integration after a clean power cycle changes
 nothing. Either the optical front-end is unpowered or the part behind that ACPI
 id is not really an APDS9960.
+
+### Auto-brightness without a working ALS
+
+Since the sensor returns nothing, `surface-autobrightness` drives the backlight
+from solar position instead: full brightness in daylight, dim at night, and a
+smooth ~90 minute ramp across dawn and dusk.
+
+For a vehicle-mounted tablet this is arguably better than a real ALS, which
+would swing every time you pass under a bridge or a streetlight sweeps the
+cabin. Solar position is smooth and predictable.
+
+Manual changes win. If the panel brightness stops matching what the script last
+set, it assumes a human moved it deliberately and backs off (default 90 min)
+rather than fighting them.
+
+```bash
+surface-autobrightness status      # what it would do, and why - changes nothing
+systemctl --user enable --now surface-autobrightness.timer
+```
+
+It ships **disabled**, because enabling it at night immediately dims the screen.
+Without `LAT`/`LON` it falls back to a fixed 07:00-19:00 window:
+
+```ini
+# ~/.config/surface-autobrightness.conf
+LAT=47.61
+LON=-122.33
+DAY_PCT=100
+NIGHT_PCT=15
+RAMP_MIN=45
+OVERRIDE_MIN=90
+```
 
 ### Cameras
 
@@ -122,6 +154,7 @@ IPTS-encoded and only `iptsd` can decode it.
 | `surface-touch-doctor [--fix]` | Diagnose a dead touchscreen; distinguishes the `-110` timeout from the IOMMU case and applies polling only when that is the real fault |
 | `surface-osk [toggle\|show\|hide\|status\|is-visible]` | On-screen keyboard (`wvkbd`) |
 | `surface-autorotate [toggle\|on\|off\|status\|is-locked]` | Accelerometer rotation lock |
+| `surface-autobrightness [apply\|status]` | Sun-driven screen brightness, for machines whose ALS returns nothing |
 | `surface-bt-connect [mac ...]` | Page paired Bluetooth input devices instead of waiting for them |
 
 `is-visible` and `is-locked` communicate by **exit code** (0 = yes), which is

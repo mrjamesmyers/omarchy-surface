@@ -1,0 +1,15 @@
+[Unit]
+Description=Re-evaluate screen brightness periodically
+Documentation=https://github.com/linux-surface/linux-surface/issues/2274
+
+[Timer]
+# Soon after login, then every 5 minutes. The ramp either side of sunrise and
+# sunset spans ~90 minutes, so 5-minute steps are invisible in practice while
+# keeping the timer cheap.
+OnStartupSec=30s
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

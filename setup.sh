@@ -160,6 +160,18 @@ if [[ -d $REPO/services ]]; then
   info "harmless with no paired input devices - it exits immediately"
 fi
 
+step "Auto-brightness (installed, not enabled)"
+if [[ -f $REPO/services/surface-autobrightness.timer ]]; then
+  run "install -Dm644 '$REPO/services/surface-autobrightness.service' \"\$HOME/.config/systemd/user/surface-autobrightness.service\""
+  run "install -Dm644 '$REPO/services/surface-autobrightness.timer'   \"\$HOME/.config/systemd/user/surface-autobrightness.timer\""
+  run "systemctl --user daemon-reload"
+  info "left DISABLED so it cannot surprise you by dimming the screen."
+  info "Preview:  surface-autobrightness status"
+  info "Enable :  systemctl --user enable --now surface-autobrightness.timer"
+  info "For true sunrise/sunset put LAT= and LON= in"
+  info "  ~/.config/surface-autobrightness.conf (otherwise 07:00-19:00)"
+fi
+
 # ------------------------------------------------------------------ summary --
 step "Summary"
 info "touch stack   : $TOUCH_STACK"
