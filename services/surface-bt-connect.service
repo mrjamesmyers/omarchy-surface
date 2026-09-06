@@ -1,0 +1,15 @@
+[Unit]
+Description=Actively connect paired Bluetooth input devices
+Documentation=https://github.com/mrjamesmyers/omarchy-surface
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+# simple, not oneshot: a keyboard that refuses to wake must never hold up boot.
+Type=simple
+Environment=BT_CONNECT_TIMEOUT=120
+Environment=BT_CONNECT_INTERVAL=3
+ExecStart=/usr/local/bin/surface-bt-connect
+
+[Install]
+WantedBy=multi-user.target

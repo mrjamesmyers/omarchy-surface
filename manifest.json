@@ -4,16 +4,16 @@
   "name": "Surface Tablet Controls",
   "version": "0.1.0",
   "author": "omarchy-surface",
-  "description": "On-screen keyboard and rotation lock for Surface tablets",
+  "description": "Tablet controls: on-screen keyboard, rotation lock, touch diagnostics",
   "kinds": [
     "bar-widget"
   ],
   "entryPoints": {
-    "barWidget": "SurfaceTablet.qml"
+    "barWidget": "TabletPanel.qml"
   },
   "barWidget": {
     "displayName": "Surface Tablet",
-    "description": "Tap to toggle the on-screen keyboard; right-click to lock rotation",
+    "description": "Tap for the tablet panel; right-click toggles the on-screen keyboard",
     "category": "Hardware",
     "defaultSection": "right",
     "allowMultiple": false

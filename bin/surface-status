@@ -1,0 +1,63 @@
+#!/bin/bash
+# Machine-readable tablet status for the bar panel.
+#
+# Emits `key=value` lines, one per line, values free of `=` so the QML side can
+# split on the first delimiter and stop worrying. Always exits 0: a panel that
+# renders "unknown" is far better than a panel that renders nothing.
+#
+# Usage: surface-status
+
+set -u
+export HYPRLAND_INSTANCE_SIGNATURE="${HYPRLAND_INSTANCE_SIGNATURE:-$(ls -t "${XDG_RUNTIME_DIR:-/run/user/$UID}/hypr" 2>/dev/null | head -1)}"
+
+emit() { printf '%s=%s\n' "$1" "$2"; }
+
+emit model "$(cat /sys/class/dmi/id/product_name 2>/dev/null || echo unknown)"
+
+# --- touchscreen -------------------------------------------------------------
+THC=$(lspci -Dn 2>/dev/null | awk '$2 ~ /^0901:/ {print $1}' | head -1)
+if [[ -z $THC ]]; then
+  emit touch unknown
+  emit touch_detail "no touch controller on PCI"
+else
+  bound=$(lspci -ks "$THC" 2>/dev/null | grep -oP 'Kernel driver in use: \K.*')
+  iptsd_up=no
+  systemctl list-units 'iptsd@*' --state=running --no-legend 2>/dev/null | grep -q iptsd && iptsd_up=yes
+  polling=no
+  journalctl -b -k --no-pager 2>/dev/null | grep -q 'using polling instead of irq' && polling=yes
+  if [[ $bound == ithc && $iptsd_up == yes ]]; then
+    emit touch ok
+    emit touch_detail "ithc bound$([[ $polling == yes ]] && echo ', polling'), iptsd running"
+  elif [[ $bound == ithc ]]; then
+    emit touch degraded
+    emit touch_detail "ithc bound but iptsd is not running"
+  else
+    emit touch failed
+    emit touch_detail "ithc not bound - run surface-touch-doctor"
+  fi
+fi
+
+# --- stylus ------------------------------------------------------------------
+if grep -qi 'Stylus' /proc/bus/input/devices 2>/dev/null; then
+  emit stylus present
+else
+  emit stylus absent
+fi
+
+# --- toggles -----------------------------------------------------------------
+if hyprctl layers 2>/dev/null | grep -q 'namespace: wvkbd'; then emit osk visible; else emit osk hidden; fi
+if pgrep -x iio-hyprland >/dev/null 2>&1; then emit rotate auto; else emit rotate locked; fi
+
+# --- bluetooth input ---------------------------------------------------------
+total=0; conn=0
+while read -r mac; do
+  [[ -n $mac ]] || continue
+  info=$(bluetoothctl info "$mac" 2>/dev/null)
+  grep -qE 'Icon: input-' <<<"$info" || continue
+  total=$((total+1))
+  grep -q 'Connected: yes' <<<"$info" && conn=$((conn+1))
+done < <(bluetoothctl devices Paired 2>/dev/null | awk '{print $2}')
+emit bt_total "$total"
+emit bt_connected "$conn"
+
+exit 0

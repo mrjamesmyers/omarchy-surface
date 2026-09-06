@@ -1,0 +1,12 @@
+#!/bin/bash
+# systemd system-sleep hook: page paired Bluetooth input devices after resume.
+#
+# Install to /usr/lib/systemd/system-sleep/ (or /etc/systemd/system-sleep/).
+#
+# Resume has the same problem as boot: BlueZ waits for the peripheral to page
+# the host, so a sleeping keyboard stays dead until you press a key. Backgrounded
+# because system-sleep hooks block the resume path until they return.
+if [[ $1 == post ]]; then
+  BT_CONNECT_TIMEOUT=60 /usr/local/bin/surface-bt-connect &
+fi
+exit 0

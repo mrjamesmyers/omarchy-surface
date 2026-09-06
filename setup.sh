@@ -148,6 +148,18 @@ for f in "$SRC"/*; do
   info "$(basename "$f")"
 done
 
+# --------------------------------------------------------------- services ----
+step "Bluetooth connect service"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -d $REPO/services ]]; then
+  run "sudo install -Dm644 '$REPO/services/surface-bt-connect.service' /etc/systemd/system/surface-bt-connect.service"
+  run "sudo install -Dm755 '$REPO/services/surface-bt-reconnect' /usr/lib/systemd/system-sleep/surface-bt-reconnect"
+  run "sudo systemctl daemon-reload"
+  run "sudo systemctl enable surface-bt-connect.service >/dev/null"
+  info "enabled at boot, and re-runs after resume"
+  info "harmless with no paired input devices - it exits immediately"
+fi
+
 # ------------------------------------------------------------------ summary --
 step "Summary"
 info "touch stack   : $TOUCH_STACK"
