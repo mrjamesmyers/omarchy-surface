@@ -1,0 +1,108 @@
+#!/bin/bash
+# Diagnose (and optionally fix) a dead touchscreen on Intel Surface tablets.
+#
+# The failure this exists for: on some Intel Touch Host Controllers the
+# interrupt never arrives, so `ithc` times out reading the HID report
+# descriptor and probe fails with -110. The touchscreen is simply absent, with
+# nothing in the UI to explain why. Polling mode sidesteps the interrupt path
+# entirely.
+#
+# Upstream's README points Surface Pro 7+ owners at the kernel parameter
+# `intremap=nosid`, but that is the fix for a DIFFERENT failure which logs
+# "source-id verification failure". Applying it blind weakens IOMMU protection
+# and, on hardware that never logged that error, fixes nothing. So this script
+# checks which failure it is actually looking at before recommending anything.
+#
+# Usage: surface-touch-doctor [--fix]
+#   without --fix it only reports; --fix writes /etc/modprobe.d/ithc.conf
+#   (requires root) and reloads the module.
+
+set -u
+FIX=0
+[[ ${1:-} == --fix ]] && FIX=1
+
+THC_PCI=""
+say()  { printf '%s\n' "$*"; }
+head2() { printf '\n== %s ==\n' "$*"; }
+
+head2 "Device"
+# Match on PCI class 0901 ("Digitizer Pen") rather than the product string, so
+# this keeps working on locales and lspci databases that name the device
+# differently. The name match stays as a fallback for unknown class codes.
+THC_PCI=$(lspci -Dn 2>/dev/null | awk '$2 ~ /^0901:/ {print $1}' | head -1)
+[[ -z $THC_PCI ]] && THC_PCI=$(lspci -D 2>/dev/null | grep -i 'Touch Host Controller' | awk '{print $1}' | head -1)
+if [[ -z $THC_PCI ]]; then
+  say "No Intel Touch Host Controller found on the PCI bus."
+  say "If this is a Surface Pro 4-6, your device uses IPTS, not THC: the driver"
+  say "is in-kernel and you only need the 'iptsd' package."
+  exit 0
+fi
+DEVID=$(lspci -Dns "$THC_PCI" 2>/dev/null | awk '{print $3}')
+say "Touch Host Controller at $THC_PCI  (id $DEVID)"
+
+head2 "Driver binding"
+BOUND=$(lspci -ks "$THC_PCI" 2>/dev/null | grep -oP 'Kernel driver in use: \K.*')
+if [[ $BOUND == ithc ]]; then
+  say "OK: bound to ithc"
+else
+  say "NOT BOUND (kernel driver in use: ${BOUND:-none})"
+  lsmod | grep -q '^ithc' && say "  module is loaded but did not claim the device" \
+                          || say "  ithc module is not loaded - is the DKMS package installed?"
+fi
+
+head2 "Interrupt delivery"
+if [[ -d /sys/bus/pci/devices/$THC_PCI/msi_irqs ]]; then
+  say "MSI in use: $(ls /sys/bus/pci/devices/"$THC_PCI"/msi_irqs 2>/dev/null | tr '\n' ' ')"
+else
+  say "No MSI; legacy pin IRQ $(cat /sys/bus/pci/devices/"$THC_PCI"/irq 2>/dev/null)"
+fi
+grep -q ithc /proc/interrupts 2>/dev/null \
+  && say "ithc appears in /proc/interrupts (interrupts are being delivered)" \
+  || say "ithc does NOT appear in /proc/interrupts - nothing is arriving"
+
+head2 "Kernel log"
+TIMEOUT=0; SOURCEID=0; POLLING=0
+journalctl -b -k --no-pager 2>/dev/null | grep -q 'failed to read report descriptor' && TIMEOUT=1
+journalctl -b -k --no-pager 2>/dev/null | grep -qi 'source-id verification failure' && SOURCEID=1
+journalctl -b -k --no-pager 2>/dev/null | grep -q 'using polling instead of irq' && POLLING=1
+((POLLING))  && say "polling mode is ACTIVE"
+((TIMEOUT))  && say "FOUND: 'failed to read report descriptor' (-110 timeout)"
+((SOURCEID)) && say "FOUND: 'source-id verification failure' (IOMMU is blocking the interrupt)"
+((TIMEOUT || SOURCEID)) || say "no ithc errors logged this boot"
+
+head2 "Verdict"
+if [[ $BOUND == ithc ]] && ! ((TIMEOUT)); then
+  say "Touchscreen driver is healthy."
+  systemctl list-units 'iptsd@*' --state=running --no-legend 2>/dev/null | grep -q iptsd \
+    && say "iptsd is running - touch input should work." \
+    || say "WARNING: iptsd is NOT running. Install it: the touch data is IPTS-encoded"
+  exit 0
+fi
+
+if ((SOURCEID)); then
+  say "The IOMMU is blocking this device's interrupt. The upstream fix is the"
+  say "kernel parameter 'intremap=nosid'. That weakens a DMA-hardening check,"
+  say "so apply it deliberately - this script will not do it for you."
+  exit 1
+fi
+
+if ((TIMEOUT)); then
+  say "Interrupts are not reaching the driver, so the report-descriptor read"
+  say "times out. Polling mode avoids the interrupt path with no IOMMU"
+  say "trade-off, at a small CPU cost."
+  if ((FIX)); then
+    [[ $EUID -eq 0 ]] || { say "Re-run as root to apply: sudo $0 --fix"; exit 1; }
+    printf '# Applied by surface-touch-doctor: interrupts are never delivered on\n# this controller (%s), so probe fails with -110. Polling avoids it.\noptions ithc poll=1\n' \
+      "$DEVID" > /etc/modprobe.d/ithc.conf
+    say "wrote /etc/modprobe.d/ithc.conf"
+    modprobe -r ithc 2>/dev/null; modprobe ithc 2>/dev/null; sleep 3
+    if lspci -ks "$THC_PCI" | grep -q 'Kernel driver in use: ithc'; then
+      say "SUCCESS: ithc is now bound. Touch should work; iptsd starts from its udev rule."
+    else
+      say "Still not bound. Check 'journalctl -b -k | grep ithc'."
+      exit 1
+    fi
+  else
+    say "Re-run with --fix (as root) to apply 'options ithc poll=1' and reload."
+  fi
+fi

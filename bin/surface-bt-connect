@@ -1,0 +1,54 @@
+#!/bin/bash
+# Actively connect paired Bluetooth input devices.
+#
+# BlueZ never initiates a connection to a paired device at startup - it waits
+# for the peripheral to wake up and page the host. For a keyboard that sleeps,
+# that can mean minutes of an apparently dead keyboard after boot. This flips
+# it around: the host pages the keyboard instead of waiting to be paged.
+#
+# Retries because the adapter may not have settled yet, and a sleeping keyboard
+# often needs several attempts before it answers. It never exits non-zero on
+# failure - a keyboard that will not wake must not fail the boot.
+#
+# Usage: surface-bt-connect [mac ...]      (default: every paired input device)
+
+set -u
+DEADLINE=$((SECONDS + ${BT_CONNECT_TIMEOUT:-90}))
+INTERVAL=${BT_CONNECT_INTERVAL:-3}
+
+log() { echo "surface-bt-connect: $*"; }
+
+input_macs() {
+  local mac
+  bluetoothctl devices Paired 2>/dev/null | awk '{print $2}' | while read -r mac; do
+    [[ -n $mac ]] || continue
+    bluetoothctl info "$mac" 2>/dev/null | grep -qE 'Icon: input-' && echo "$mac"
+  done
+}
+
+is_connected() { bluetoothctl info "$1" 2>/dev/null | grep -q 'Connected: yes'; }
+
+while ((SECONDS < DEADLINE)); do
+  bluetoothctl show 2>/dev/null | grep -q 'Powered: yes' && break
+  sleep 1
+done
+
+if (($# > 0)); then MACS=("$@"); else mapfile -t MACS < <(input_macs); fi
+if ((${#MACS[@]} == 0)); then log "no paired input devices; nothing to do"; exit 0; fi
+log "targets: ${MACS[*]}"
+
+while ((SECONDS < DEADLINE)); do
+  pending=0
+  for mac in "${MACS[@]}"; do
+    is_connected "$mac" && continue
+    pending=1
+    log "paging $mac ..."
+    bluetoothctl connect "$mac" >/dev/null 2>&1
+  done
+  ((pending == 0)) && { log "all input devices connected after ${SECONDS}s"; exit 0; }
+  sleep "$INTERVAL"
+done
+
+log "gave up after ${SECONDS}s; still disconnected:"
+for mac in "${MACS[@]}"; do is_connected "$mac" || log "  $mac"; done
+exit 0

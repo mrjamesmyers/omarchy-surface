@@ -1,0 +1,46 @@
+#!/bin/bash
+# On-screen keyboard control for Omarchy on Surface tablets.
+#
+# Visibility is read from Hyprland's layer list rather than a state file:
+# wvkbd unmaps its layer surface when hidden, so `hyprctl layers` is ground
+# truth. A state file goes stale whenever --auto shows or hides the keyboard on
+# text-field focus, which silently inverts a naive toggle.
+#
+# Usage: surface-osk [toggle|show|hide|status|is-visible|start]
+#   is-visible exits 0 when shown, 1 when hidden - that is what the bar widget
+#   polls, since exit codes are cheaper to consume from QML than parsing text.
+
+set -u
+
+: "${OSK_HEIGHT:=300}"          # portrait height in px
+: "${OSK_LANDSCAPE_HEIGHT:=220}"
+: "${OSK_FONT:=DejaVu Sans 16}"
+
+export HYPRLAND_INSTANCE_SIGNATURE="${HYPRLAND_INSTANCE_SIGNATURE:-$(ls -t "${XDG_RUNTIME_DIR:-/run/user/$UID}/hypr" 2>/dev/null | head -1)}"
+
+running() { pgrep -x wvkbd-mobintl >/dev/null 2>&1; }
+visible() { hyprctl layers 2>/dev/null | grep -q 'namespace: wvkbd'; }
+
+start() {
+  running && return 0
+  # --hidden so it does not cover the screen at login; --auto still pops it up
+  # for apps that implement text-input-v3.
+  wvkbd-mobintl --hidden --auto \
+    -H "$OSK_HEIGHT" -L "$OSK_LANDSCAPE_HEIGHT" --fn "$OSK_FONT" \
+    >/dev/null 2>&1 &
+  for _ in {1..40}; do running && return 0; sleep 0.05; done
+  return 1
+}
+
+show() { start || return 1; visible || pkill -USR2 -x wvkbd-mobintl; }
+hide() { running || return 0; visible && pkill -USR1 -x wvkbd-mobintl; }
+
+case "${1:-toggle}" in
+  toggle)     if running && visible; then hide; else show; fi ;;
+  show)       show ;;
+  hide)       hide ;;
+  start)      start ;;
+  status)     visible && echo visible || echo hidden ;;
+  is-visible) visible ;;
+  *) echo "usage: ${0##*/} [toggle|show|hide|status|is-visible|start]" >&2; exit 2 ;;
+esac

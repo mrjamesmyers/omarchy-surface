@@ -1,0 +1,39 @@
+#!/bin/bash
+# Accelerometer-driven screen rotation control.
+#
+# iio-hyprland watches the ISH accelerometer and rotates the display. "Rotation
+# lock" is simply whether that watcher is running, which keeps the state
+# observable from outside instead of hidden in a config file.
+#
+# Usage: surface-autorotate [toggle|on|off|status|is-locked]
+#   is-locked exits 0 when rotation is LOCKED (watcher stopped), 1 when free.
+
+set -u
+
+export HYPRLAND_INSTANCE_SIGNATURE="${HYPRLAND_INSTANCE_SIGNATURE:-$(ls -t "${XDG_RUNTIME_DIR:-/run/user/$UID}/hypr" 2>/dev/null | head -1)}"
+
+running() { pgrep -x iio-hyprland >/dev/null 2>&1; }
+
+start() {
+  running && return 0
+  command -v iio-hyprland >/dev/null 2>&1 || { echo "iio-hyprland not installed" >&2; return 1; }
+  iio-hyprland >/dev/null 2>&1 &
+  for _ in {1..40}; do running && return 0; sleep 0.05; done
+  return 1
+}
+
+stop() {
+  pkill -x iio-hyprland 2>/dev/null
+  # Leaving the panel sideways because the watcher died is worse than the lock
+  # itself, so return to normal on the way out.
+  hyprctl keyword monitor ",preferred,auto,auto,transform,0" >/dev/null 2>&1
+}
+
+case "${1:-toggle}" in
+  toggle)    if running; then stop; else start; fi ;;
+  on)        start ;;
+  off)       stop ;;
+  status)    running && echo "auto-rotate on" || echo "rotation locked" ;;
+  is-locked) ! running ;;
+  *) echo "usage: ${0##*/} [toggle|on|off|status|is-locked]" >&2; exit 2 ;;
+esac
