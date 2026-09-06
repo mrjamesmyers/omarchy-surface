@@ -1,0 +1,135 @@
+#!/bin/bash
+# Full hardware audit for Intel Surface devices on Linux.
+#
+# Prints what works, what does not, and the evidence for each verdict, so a bug
+# report can be pasted straight from the output. Every check is read-only.
+#
+# Usage: surface-hw-report [--raw]     --raw appends the underlying log lines
+
+set -u
+RAW=0
+[[ ${1:-} == --raw ]] && RAW=1
+
+ok()   { printf '  \033[32mOK\033[0m      %-22s %s\n' "$1" "${2:-}"; }
+bad()  { printf '  \033[31mBROKEN\033[0m  %-22s %s\n' "$1" "${2:-}"; }
+warn() { printf '  \033[33mPARTIAL\033[0m %-22s %s\n' "$1" "${2:-}"; }
+na()   { printf '  --      %-22s %s\n' "$1" "${2:-}"; }
+head2(){ printf '\n\033[1m%s\033[0m\n' "$1"; }
+
+klog() { journalctl -b -k --no-pager 2>/dev/null; }
+
+echo "======================================================"
+echo " $(cat /sys/class/dmi/id/product_name 2>/dev/null) - $(uname -r)"
+echo "======================================================"
+
+head2 "Input"
+if lspci -Dn 2>/dev/null | awk '$2 ~ /^0901:/' | grep -q .; then
+  THC=$(lspci -Dn | awk '$2 ~ /^0901:/ {print $1}' | head -1)
+  if lspci -ks "$THC" | grep -q 'Kernel driver in use: ithc'; then
+    poll=$(klog | grep -q 'using polling instead of irq' && echo ' (polling)')
+    if systemctl list-units 'iptsd@*' --state=running --no-legend 2>/dev/null | grep -q iptsd; then
+      ok "touchscreen" "ithc bound${poll}, iptsd running"
+    else
+      warn "touchscreen" "ithc bound but iptsd not running"
+    fi
+  else
+    bad "touchscreen" "ithc not bound - run surface-touch-doctor"
+  fi
+else
+  na "touchscreen" "no THC on PCI (IPTS-era device?)"
+fi
+
+grep -qi 'stylus' /proc/bus/input/devices 2>/dev/null \
+  && ok "pen / stylus" "$(grep -ci stylus /proc/bus/input/devices) device nodes" \
+  || na "pen / stylus" "not detected"
+
+pgrep -x iio-hyprland >/dev/null 2>&1 \
+  && ok "auto-rotate" "iio-hyprland running" \
+  || na "auto-rotate" "watcher not running (rotation locked?)"
+
+[[ -n $(ls /sys/class/leds/ 2>/dev/null | grep -i 'kbd_backlight') ]] \
+  && ok "keyboard backlight" "$(ls /sys/class/leds | grep -i kbd_backlight)" \
+  || bad "keyboard backlight" "no kbd_backlight in /sys/class/leds (Type Cover backlight unavailable)"
+
+head2 "Sensors"
+ALS=""
+for d in /sys/bus/iio/devices/iio:device*; do
+  [[ -e $d/name ]] || continue
+  n=$(cat "$d/name")
+  case $n in apds9960|*als*|*light*) ALS=$d ;; esac
+done
+if [[ -n $ALS ]]; then
+  clear_raw=$(cat "$ALS"/in_intensity_clear_raw 2>/dev/null || echo "")
+  irq_count=$(awk '/apds9960/ {s=0; for(i=2;i<=NF-2;i++) s+=$i; print s}' /proc/interrupts 2>/dev/null | head -1)
+  if [[ -z $clear_raw ]]; then
+    bad "ambient light" "$(cat "$ALS"/name) present but exposes no readable channel"
+  elif [[ $clear_raw == 0 && ${irq_count:-0} -eq 0 ]]; then
+    bad "ambient light" "$(cat "$ALS"/name): reads 0, interrupt never fired (${irq_count:-0} IRQs)"
+    printf '          %s\n' "ADC never sets AVALID even with PON+AEN set - kernel/firmware gap, not config"
+  else
+    ok "ambient light" "$(cat "$ALS"/name) reading $clear_raw"
+  fi
+else
+  na "ambient light" "no ALS iio device"
+fi
+printf '  --      %-22s %s\n' "auto-brightness" "blocked while the ALS returns no data"
+
+for s in accel_3d gyro_3d dev_rotation gravity; do
+  grep -qx "$s" /sys/bus/iio/devices/iio:device*/name 2>/dev/null && ok "$s" "via ISH sensor hub"
+done
+
+head2 "Cameras"
+if lspci -n 2>/dev/null | grep -q '0480: 8086:9a19'; then
+  ncam=$(klog | grep -oP 'Connected \K[0-9]+(?= cameras)' | tail -1)
+  boot=$(klog | grep -q 'CSE authenticate_run done' && echo "firmware booted" || echo "firmware NOT booted")
+  gpio_bug=$(klog | grep -c 'GPIO type .* unknown')
+  csi_err=$(klog | grep -c 'csi2-.* error')
+  if ((gpio_bug > 0)); then
+    bad "IPU6 cameras" "${ncam:-?} sensors found, $boot"
+    printf '          %s\n' "int3472 reports 'GPIO type unknown' - sensor power sequencing is wrong"
+    ((csi_err > 0)) && printf '          %s\n' "CSI-2 receiver logged $csi_err errors (FIFO overflow / discarded packets)"
+    printf '          %s\n' "libcamera enumerates them but buffers come back empty"
+  elif ((csi_err > 0)); then
+    warn "IPU6 cameras" "${ncam:-?} sensors, but $csi_err CSI-2 errors"
+  else
+    ok "IPU6 cameras" "${ncam:-?} sensors, $boot"
+  fi
+  klog | grep -q 'ov7251.*probe with driver ov7251 failed' \
+    && bad "IR camera" "ov7251 probe failed (-121) - Windows Hello unavailable"
+  command -v cam >/dev/null 2>&1 \
+    && printf '          %s\n' "libcamera present: try 'cam -l'" \
+    || printf '          %s\n' "libcamera not installed (pacman -S libcamera libcamera-ipa libcamera-tools)"
+else
+  na "cameras" "no IPU6 on this machine"
+fi
+
+head2 "Power"
+[[ -n $(ls /sys/class/power_supply/BAT*/charge_control_end_threshold 2>/dev/null) ]] \
+  && ok "charge limit" "$(cat /sys/class/power_supply/BAT*/charge_control_end_threshold)" \
+  || bad "charge limit" "no charge_control_end_threshold (Surface battery limit unavailable)"
+
+[[ -r /sys/firmware/acpi/platform_profile ]] \
+  && ok "thermal profile" "$(cat /sys/firmware/acpi/platform_profile) of [$(cat /sys/firmware/acpi/platform_profile_choices)]" \
+  || na "thermal profile" "not exposed"
+
+ms=$(cat /sys/power/mem_sleep 2>/dev/null)
+if grep -q disk /sys/power/state 2>/dev/null; then
+  ok "suspend/hibernate" "mem_sleep=$ms, hibernate available"
+else
+  warn "suspend" "mem_sleep=$ms, no hibernate"
+fi
+[[ $ms == *"[s2idle]"* ]] && printf '          %s\n' "s2idle only (no deep S3): suspend still draws power - prefer suspend-then-hibernate"
+
+head2 "Radios"
+nmcli -t -f DEVICE,TYPE,STATE dev 2>/dev/null | grep -q '^.*:wifi:connected' \
+  && ok "wifi" "connected" || na "wifi" "not connected"
+bluetoothctl show 2>/dev/null | grep -q 'Powered: yes' \
+  && ok "bluetooth" "adapter powered" || na "bluetooth" "adapter off"
+
+if ((RAW)); then
+  head2 "Raw evidence"
+  klog | grep -iE 'ov5693|ov8865|ov7251|int3472|ipu6|csi2-|apds|ithc' | tail -40
+fi
+
+echo
+echo "Legend: OK works · PARTIAL degraded · BROKEN needs kernel/firmware work · -- n/a"

@@ -26,10 +26,62 @@ someone with a dead touchscreen and no obvious way back.
 | Other `ithc` controllers (ADL / RPL / etc.) | `ithc` + `iptsd` | ⚠️ Driver applies; polling need unknown — gated behind `surface-touch-doctor` or `--force` |
 | Surface Pro 4/5/6, Book, Laptop 1/2 | IPTS | ❌ Needs the `linux-surface` kernel; mainline has no IPTS driver. The script says so rather than pretending |
 
-**Cameras are out of scope.** The `ov5693`/`ov7251`/`ov8865` sensors fail with
-`-121` and need an IPU3 libcamera pipeline that does not work reliably. Windows
-Hello IR face unlock depends on those same sensors. Claiming "full parity" while
-these are broken would be a lie.
+## Hardware status
+
+`surface-hw-report` prints this live, with the evidence behind each verdict, so
+you can paste it straight into a bug report. Measured on Surface Pro 7+:
+
+| Feature | Status | Detail |
+|---|---|---|
+| Touchscreen | ✅ | `ithc` (polling) + `iptsd` |
+| Pen / stylus | ✅ | incl. IPTSD virtual stylus |
+| Auto-rotate | ✅ | ISH accelerometer via `iio-hyprland` |
+| Accel / gyro / orientation / gravity | ✅ | ISH sensor hub |
+| Wi-Fi / Bluetooth / audio / battery | ✅ | stock kernel |
+| Thermal profiles | ✅ | `surface_platform_profile` |
+| Suspend + hibernate | ✅ | s2idle only — see below |
+| **Ambient light sensor** | ❌ | driver binds, ADC never converts |
+| **Auto-brightness** | ❌ | blocked by the ALS |
+| **Cameras** | ❌ | IPU6 firmware boots, sensors mis-powered |
+| **IR camera / Windows Hello** | ❌ | `ov7251` probe fails `-121` |
+| **Type Cover backlight** | ❌ | no `kbd_backlight` in `/sys/class/leds` |
+| **Battery charge limit** | ❌ | no `charge_control_end_threshold` |
+
+Everything in the bottom block needs **kernel or firmware work** — none of it is
+a configuration gap you can close from userspace.
+
+### Ambient light sensor
+
+The ALS is an APDS9960 at i2c `0x39`, ACPI id `MSHW0184`, and mainline
+deliberately claims it (`alias: acpi*:MSHW0184:*`). It still returns nothing:
+
+- `ENABLE (0x80) = 0x03` — power-on and ALS-enable are both set
+- `STATUS (0x93) = 0x00` — `AVALID` never sets; the ADC never finishes a conversion
+- `ID (0x92) = 0xdc` — a stock APDS9960 reports `0xab`
+- its GPIO interrupt has **never fired** (`0` counts in `/proc/interrupts`)
+
+Forcing 64x gain and ~103 ms integration after a clean power cycle changes
+nothing. Either the optical front-end is unpowered or the part behind that ACPI
+id is not really an APDS9960.
+
+### Cameras
+
+Worth correcting a common misconception: on Tiger Lake Surfaces this is **IPU6,
+not IPU3**, and the kernel side gets impressively far — the firmware
+authenticates and boots, three sensors are found, the media graph populates, and
+`libcamera` enumerates a front and a back camera. Capture still yields empty
+buffers, because:
+
+```
+int3472-discrete INT3472:01: GPIO type 0x08 unknown; the sensor may not work
+ov5693/ov8865/ov7251: supply dovdd/dvdd not found, using dummy regulator
+intel_ipu6_isys: csi2-4 error: Transfer FIFO overflow
+```
+
+`int3472` owns camera power and reset GPIOs. It does not recognise a GPIO type
+on this board, so the sensors are never sequenced correctly and the CSI-2
+receiver overflows on malformed data. Fixing that is a kernel quirk, not
+configuration.
 
 ## The Surface Pro 7+ touchscreen finding
 
